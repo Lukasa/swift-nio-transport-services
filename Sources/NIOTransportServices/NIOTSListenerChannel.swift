@@ -343,11 +343,9 @@ extension NIOTSListenerChannel: StateManagedChannel {
 
         let channel = self.unwrapData(data, as: NIOTSConnectionChannel.self)
         let p: EventLoopPromise<Void> = self.eventLoop.newPromise()
-        channel.eventLoop.execute {
-            channel.registerAlreadyConfigured0(promise: p)
-            p.futureResult.whenFailure { (_: Error) in
-                channel.close(promise: nil)
-            }
+        channel.registerAlreadyConfigured0(promise: p)
+        p.futureResult.whenFailure { (_: Error) in
+            channel.close(promise: nil)
         }
     }
 
