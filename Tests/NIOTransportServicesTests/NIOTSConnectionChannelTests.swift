@@ -306,56 +306,55 @@ class NIOTSConnectionChannelTests: XCTestCase {
         // The channel will remain writable until after the write of e, at which point the channel will
         // become non-writable.
         //
-        // Then we will issue a flush. The writes will succeed in order. The channel will remain non-writable
-        // until after the promise for d has fired: by the time the promise for e has fired it will be writable
-        // again.
+        // Then we will issue a flush. The writes will succeed in order. As these writes have been
+        // aggregated into the system, they'll all complete at once, so they'll see the same state.
+        // This state will be that the channel will be writable, but the writability notification won't
+        // have fired. The writability notification fires _after_ the promise completes.
         try connection.eventLoop.submit {
             // Pre writing.
             XCTAssertEqual(writabilities, [])
             XCTAssertTrue(connection.isWritable)
 
             // Write a. After this write, we are still writable. When this write
-            // succeeds, we'll still be not writable.
+            // succeeds, we'll be writable.
             connection.write(buffer.getSlice(at: 0, length: 1)).whenComplete { (_: Result<Void, Error>) in
                 XCTAssertEqual(writabilities, [false])
-                XCTAssertFalse(connection.isWritable)
+                XCTAssertTrue(connection.isWritable)
             }
             XCTAssertEqual(writabilities, [])
             XCTAssertTrue(connection.isWritable)
 
             // Write b. After this write we are still writable. When this write
-            // succeeds we'll still be not writable.
+            // succeeds we'll be writable.
             connection.write(buffer.getSlice(at: 0, length: 1)).whenComplete { (_: Result<Void, Error>) in
                 XCTAssertEqual(writabilities, [false])
-                XCTAssertFalse(connection.isWritable)
+                XCTAssertTrue(connection.isWritable)
             }
             XCTAssertEqual(writabilities, [])
             XCTAssertTrue(connection.isWritable)
 
             // Write c. After this write we are still writable (2047 bytes written).
-            // When this write succeeds we'll still be not writable (2 bytes outstanding).
+            // When this write succeeds we'll be writable.
             connection.write(buffer.getSlice(at: 0, length: 2045)).whenComplete { (_: Result<Void, Error>) in
                 XCTAssertEqual(writabilities, [false])
-                XCTAssertFalse(connection.isWritable)
+                XCTAssertTrue(connection.isWritable)
             }
             XCTAssertEqual(writabilities, [])
             XCTAssertTrue(connection.isWritable)
 
             // Write d. After this write we are still writable (2048 bytes written).
-            // When this write succeeds we'll become writable, but critically the promise fires before
-            // the state change, so we'll *appear* to be unwritable.
+            // When this write succeeds we'll be writable.
             connection.write(buffer.getSlice(at: 0, length: 1)).whenComplete { (_: Result<Void, Error>) in
                 XCTAssertEqual(writabilities, [false])
-                XCTAssertFalse(connection.isWritable)
+                XCTAssertTrue(connection.isWritable)
             }
             XCTAssertEqual(writabilities, [])
             XCTAssertTrue(connection.isWritable)
 
             // Write e. After this write we are now not writable (2049 bytes written).
-            // When this write succeeds we'll have already been writable, thanks to the previous
-            // write.
+            // When this write succeeds we'll be writable.
             connection.write(buffer.getSlice(at: 0, length: 1)).whenComplete { (_: Result<Void, Error>) in
-                XCTAssertEqual(writabilities, [false, true])
+                XCTAssertEqual(writabilities, [false])
                 XCTAssertTrue(connection.isWritable)
 
                 // We close after this succeeds.

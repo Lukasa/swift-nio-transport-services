@@ -64,7 +64,7 @@ private struct ConnectionChannelOptions {
 }
 
 
-private typealias PendingWrite = (data: ByteBuffer, promise: EventLoopPromise<Void>?)
+internal typealias PendingWrite = (data: ByteBuffer, promise: EventLoopPromise<Void>?)
 
 
 /// A structure that manages backpressure signaling on this channel.
@@ -501,25 +501,26 @@ extension NIOTSConnectionChannel: StateManagedChannel {
 
         func completionCallback(promise: EventLoopPromise<Void>?, sentBytes: Int) -> ((NWError?) -> Void) {
             return { error in
+                let writabilityChanged = self.backpressureManager.writabilityChanges(whenBytesSent: sentBytes)
+
                 if let error = error {
                     promise?.fail(error)
                 } else {
                     promise?.succeed(())
                 }
 
-                if self.backpressureManager.writabilityChanges(whenBytesSent: sentBytes) {
+                if writabilityChanged {
                     self.pipeline.fireChannelWritabilityChanged()
                 }
             }
         }
 
-        conn.batch {
-            while self.pendingWrites.count > 0 {
-                let write = self.pendingWrites.removeFirst()
-                let buffer = write.data
-                let content = buffer.getData(at: buffer.readerIndex, length: buffer.readableBytes)
-                conn.send(content: content, completion: .contentProcessed(completionCallback(promise: write.promise, sentBytes: buffer.readableBytes)))
-            }
+        let (write, promise) = self.pendingWrites.consumeMarkedElementsAsDispatchData()
+
+        if #available(OSX 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *) {
+            conn.send(content: write, completion: .contentProcessed(completionCallback(promise: promise, sentBytes: write.count)))
+        } else {
+            conn.send(content: Data(write), completion: .contentProcessed(completionCallback(promise: promise, sentBytes: write.count)))
         }
     }
 
