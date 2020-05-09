@@ -7,9 +7,7 @@
 //
 // See LICENSE.txt for license information
 // See CONTRIBUTORS.txt for the list of SwiftNIO project authors
-// swift-tools-version:4.0
 //
-// swift-tools-version:4.0
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
@@ -22,7 +20,7 @@ import Network
 @available(OSX 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *)
 internal extension NWProtocolTCP.Options {
     /// Apply a given channel `SocketOption` to this protocol options state.
-    func applyChannelOption(option: SocketOption, value: SocketOptionValue) throws {
+    func applyChannelOption(option: ChannelOptions.Types.SocketOption, value: SocketOptionValue) throws {
         switch (option.level, option.name) {
         case (IPPROTO_TCP, TCP_NODELAY):
             self.noDelay = value != 0
@@ -54,7 +52,7 @@ internal extension NWProtocolTCP.Options {
     }
 
     /// Obtain the given `SocketOption` value for this protocol options state.
-    func valueFor(socketOption option: SocketOption) throws -> SocketOptionValue {
+    func valueFor(socketOption option: ChannelOptions.Types.SocketOption) throws -> SocketOptionValue {
         switch (option.level, option.name) {
         case (IPPROTO_TCP, TCP_NODELAY):
             return self.noDelay ? 1 : 0

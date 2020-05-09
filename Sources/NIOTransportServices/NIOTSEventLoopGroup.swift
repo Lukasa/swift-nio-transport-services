@@ -7,9 +7,7 @@
 //
 // See LICENSE.txt for license information
 // See CONTRIBUTORS.txt for the list of SwiftNIO project authors
-// swift-tools-version:4.0
 //
-// swift-tools-version:4.0
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
@@ -49,7 +47,7 @@ import Network
 /// preferred networking backend.
 @available(OSX 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *)
 public final class NIOTSEventLoopGroup: EventLoopGroup {
-    private let index = Atomic<Int>(value: 0)
+    private let index = NIOAtomic<Int>.makeAtomic(value: 0)
     private let eventLoops: [NIOTSEventLoop]
 
     public init(loopCount: Int = 1, defaultQoS: DispatchQoS = .default) {
@@ -83,6 +81,36 @@ public final class NIOTSEventLoopGroup: EventLoopGroup {
 
     public func makeIterator() -> EventLoopIterator {
         return EventLoopIterator(self.eventLoops)
+    }
+}
+
+/// A TLS provider to bootstrap TLS-enabled connections with `NIOClientTCPBootstrap`.
+///
+/// Example:
+///
+///     // Creating the "universal bootstrap" with the `NIOTSClientTLSProvider`.
+///     let tlsProvider = NIOTSClientTLSProvider()
+///     let bootstrap = NIOClientTCPBootstrap(NIOTSConnectionBootstrap(group: group), tls: tlsProvider)
+///
+///     // Bootstrapping a connection using the "universal bootstrapping mechanism"
+///     let connection = bootstrap.enableTLS()
+///                          .connect(host: "example.com", port: 443)
+///                          .wait()
+@available(OSX 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *)
+public struct NIOTSClientTLSProvider: NIOClientTLSProvider {
+    public typealias Bootstrap = NIOTSConnectionBootstrap
+
+    let tlsOptions: NWProtocolTLS.Options
+
+    /// Construct the TLS provider.
+    public init(tlsOptions: NWProtocolTLS.Options = NWProtocolTLS.Options()) {
+        self.tlsOptions = tlsOptions
+    }
+
+    /// Enable TLS on the bootstrap. This is not a function you will typically call as a user, it is called by
+    /// `NIOClientTCPBootstrap`.
+    public func enableTLS(_ bootstrap: NIOTSConnectionBootstrap) -> NIOTSConnectionBootstrap {
+        return bootstrap.tlsOptions(self.tlsOptions)
     }
 }
 #endif

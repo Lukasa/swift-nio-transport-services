@@ -2,14 +2,12 @@
 //
 // This source file is part of the SwiftNIO open source project
 //
-// Copyright (c) 2017-2018 Apple Inc. and the SwiftNIO project authors
+// Copyright (c) 2017-2020 Apple Inc. and the SwiftNIO project authors
 // Licensed under Apache License v2.0
 //
 // See LICENSE.txt for license information
 // See CONTRIBUTORS.txt for the list of SwiftNIO project authors
-// swift-tools-version:4.0
 //
-// swift-tools-version:4.0
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
@@ -19,14 +17,50 @@ import NIO
 import Dispatch
 import Network
 
+/// A `NIOTSListenerBootstrap` is an easy way to bootstrap a `NIOTSListenerChannel` when creating network servers.
+///
+/// Example:
+///
+/// ```swift
+///     let group = NIOTSEventLoopGroup()
+///     defer {
+///         try! group.syncShutdownGracefully()
+///     }
+///     let bootstrap = NIOTSListenerBootstrap(group: group)
+///         // Specify backlog and enable SO_REUSEADDR for the server itself
+///         .serverChannelOption(ChannelOptions.backlog, value: 256)
+///         .serverChannelOption(ChannelOptions.socketOption(.reuseaddr), value: 1)
+///
+///         // Set the handlers that are applied to the accepted child `Channel`s.
+///         .childChannelInitializer { channel in
+///             // Ensure we don't read faster then we can write by adding the BackPressureHandler into the pipeline.
+///             channel.pipeline.addHandler(BackPressureHandler()).flatMap { () in
+///                 // make sure to instantiate your `ChannelHandlers` inside of
+///                 // the closure as it will be invoked once per connection.
+///                 channel.pipeline.addHandler(MyChannelHandler())
+///             }
+///         }
+///     let channel = try! bootstrap.bind(host: host, port: port).wait()
+///     /* the server will now be accepting connections */
+///
+///     try! channel.closeFuture.wait() // wait forever as we never close the Channel
+/// ```
+///
+/// The `EventLoopFuture` returned by `bind` will fire with a `NIOTSListenerChannel`. This is the channel that owns the
+/// listening socket. Each time it accepts a new connection it will fire a `NIOTSConnectionChannel` through the
+/// `ChannelPipeline` via `fireChannelRead`: as a result, the `NIOTSListenerChannel` operates on `Channel`s as inbound
+/// messages. Outbound messages are not supported on a `NIOTSListenerChannel` which means that each write attempt will
+/// fail.
+///
+/// Accepted `NIOTSConnectionChannel`s operate on `ByteBuffer` as inbound data, and `IOData` as outbound data.
 @available(OSX 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *)
 public final class NIOTSListenerBootstrap {
     private let group: EventLoopGroup
     private let childGroup: EventLoopGroup
     private var serverChannelInit: ((Channel) -> EventLoopFuture<Void>)?
     private var childChannelInit: ((Channel) -> EventLoopFuture<Void>)?
-    private var serverChannelOptions = ChannelOptionsStorage()
-    private var childChannelOptions = ChannelOptionsStorage()
+    private var serverChannelOptions = ChannelOptions.Storage()
+    private var childChannelOptions = ChannelOptions.Storage()
     private var serverQoS: DispatchQoS?
     private var childQoS: DispatchQoS?
     private var tcpOptions: NWProtocolTCP.Options = .init()
@@ -44,18 +78,15 @@ public final class NIOTSListenerBootstrap {
     /// Note that the "real" solution is described in https://github.com/apple/swift-nio/issues/674.
     ///
     /// - parameters:
-    ///     - group: The `EventLoopGroup` to use for the `ServerSocketChannel`.
+    ///     - group: The `EventLoopGroup` to use for the `NIOTSListenerChannel`.
     public convenience init(group: EventLoopGroup) {
         self.init(group: group, childGroup: group)
-
-        self.serverChannelOptions.append(key: ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
-        self.childChannelOptions.append(key: ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
     }
 
     /// Create a `NIOTSListenerBootstrap` for the `NIOTSEventLoopGroup` `group`.
     ///
     /// - parameters:
-    ///     - group: The `NIOTSEventLoopGroup` to use for the `ServerSocketChannel`.
+    ///     - group: The `NIOTSEventLoopGroup` to use for the `NIOTSListenerChannel`.
     public convenience init(group: NIOTSEventLoopGroup) {
         self.init(group: group as EventLoopGroup)
     }
@@ -74,7 +105,29 @@ public final class NIOTSListenerBootstrap {
     ///     - group: The `EventLoopGroup` to use for the `bind` of the `NIOTSListenerChannel`
     ///         and to accept new `NIOTSConnectionChannel`s with.
     ///     - childGroup: The `EventLoopGroup` to run the accepted `NIOTSConnectionChannel`s on.
-    public init(group: EventLoopGroup, childGroup: EventLoopGroup) {
+    public convenience init(group: EventLoopGroup, childGroup: EventLoopGroup) {
+        guard NIOTSBootstraps.isCompatible(group: group) && NIOTSBootstraps.isCompatible(group: childGroup) else {
+            preconditionFailure("NIOTSListenerBootstrap is only compatible with NIOTSEventLoopGroup and " +
+                                "NIOTSEventLoop. You tried constructing one with group: \(group) and " +
+                                "childGroup: \(childGroup) at least one of which is incompatible.")
+        }
+
+        self.init(validatingGroup: group, childGroup: childGroup)!
+    }
+
+    /// Create a `NIOTSListenerBootstrap` on the `EventLoopGroup` `group` which accepts `Channel`s on `childGroup`,
+    /// validating that the `EventLoopGroup`s are compatible with `NIOTSListenerBootstrap`.
+    ///
+    /// - parameters:
+    ///     - group: The `EventLoopGroup` to use for the `bind` of the `NIOTSListenerChannel`
+    ///         and to accept new `NIOTSConnectionChannel`s with.
+    ///     - childGroup: The `EventLoopGroup` to run the accepted `NIOTSConnectionChannel`s on.
+    public init?(validatingGroup group: EventLoopGroup, childGroup: EventLoopGroup? = nil) {
+        let childGroup = childGroup ?? group
+        guard NIOTSBootstraps.isCompatible(group: group) && NIOTSBootstraps.isCompatible(group: childGroup) else {
+            return nil
+        }
+
         self.group = group
         self.childGroup = childGroup
 
@@ -98,7 +151,7 @@ public final class NIOTSListenerBootstrap {
     /// The `NIOTSListenerChannel` uses the accepted `NIOTSConnectionChannel`s as inbound messages.
     ///
     /// - note: To set the initializer for the accepted `NIOTSConnectionChannel`s, look at
-    ///     `ServerBootstrap.childChannelInitializer`.
+    ///     `NIOTSConnectionBootstrap.childChannelInitializer`.
     ///
     /// - parameters:
     ///     - initializer: A closure that initializes the provided `Channel`.
@@ -302,10 +355,10 @@ private class AcceptHandler: ChannelInboundHandler {
     typealias InboundOut = NIOTSConnectionChannel
 
     private let childChannelInitializer: ((Channel) -> EventLoopFuture<Void>)?
-    private let childChannelOptions: ChannelOptionsStorage
+    private let childChannelOptions: ChannelOptions.Storage
 
     init(childChannelInitializer: ((Channel) -> EventLoopFuture<Void>)?,
-         childChannelOptions: ChannelOptionsStorage) {
+         childChannelOptions: ChannelOptions.Storage) {
         self.childChannelInitializer = childChannelInitializer
         self.childChannelOptions = childChannelOptions
     }
@@ -347,9 +400,9 @@ private class AcceptHandler: ChannelInboundHandler {
         if childLoop === ctxEventLoop {
             fireThroughPipeline(setupChildChannel())
         } else {
-            fireThroughPipeline(childLoop.submit {
+            fireThroughPipeline(childLoop.flatSubmit {
                 return setupChildChannel()
-            }.flatMap { $0 }.hop(to: ctxEventLoop))
+            }.hop(to: ctxEventLoop))
         }
     }
 }

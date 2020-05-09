@@ -7,9 +7,7 @@
 //
 // See LICENSE.txt for license information
 // See CONTRIBUTORS.txt for the list of SwiftNIO project authors
-// swift-tools-version:4.0
 //
-// swift-tools-version:4.0
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
@@ -160,6 +158,27 @@ final class FailOnHalfCloseHandler: ChannelInboundHandler {
 }
 
 
+final class WaitForActiveHandler: ChannelInboundHandler {
+    typealias InboundIn = Any
+
+    private let activePromise: EventLoopPromise<Channel>
+
+    init(_ promise: EventLoopPromise<Channel>) {
+        self.activePromise = promise
+    }
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        if context.channel.isActive {
+            self.activePromise.succeed(context.channel)
+        }
+    }
+
+    func channelActive(context: ChannelHandlerContext) {
+        self.activePromise.succeed(context.channel)
+    }
+}
+
+
 extension Channel {
     /// Expect that the given bytes will be received.
     func expectRead(_ bytes: ByteBuffer) -> EventLoopFuture<Void> {
@@ -298,8 +317,10 @@ class NIOTSEndToEndTests: XCTestCase {
         let serverSideConnectionPromise: EventLoopPromise<Channel> = self.group.next().makePromise()
         let listener = try NIOTSListenerBootstrap(group: self.group)
             .childChannelInitializer { channel in
-                serverSideConnectionPromise.succeed(channel)
-                return channel.pipeline.addHandler(EchoHandler())
+                return channel.pipeline.addHandlers([
+                    WaitForActiveHandler(serverSideConnectionPromise),
+                    EchoHandler()
+                ])
             }
             .bind(host: "localhost", port: 0).wait()
         defer {

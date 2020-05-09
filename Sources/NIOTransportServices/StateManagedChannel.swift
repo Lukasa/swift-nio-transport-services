@@ -7,9 +7,7 @@
 //
 // See LICENSE.txt for license information
 // See CONTRIBUTORS.txt for the list of SwiftNIO project authors
-// swift-tools-version:4.0
 //
-// swift-tools-version:4.0
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
@@ -104,7 +102,7 @@ internal protocol StateManagedChannel: Channel, ChannelCore {
 
     var state: ChannelState<ActiveSubstate> { get set }
 
-    var isActive0: Atomic<Bool> { get set }
+    var isActive0: NIOAtomic<Bool> { get set }
 
     var tsEventLoop: NIOTSEventLoop { get }
 

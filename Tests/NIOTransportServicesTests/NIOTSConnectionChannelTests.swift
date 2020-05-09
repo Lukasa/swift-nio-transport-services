@@ -7,9 +7,7 @@
 //
 // See LICENSE.txt for license information
 // See CONTRIBUTORS.txt for the list of SwiftNIO project authors
-// swift-tools-version:4.0
 //
-// swift-tools-version:4.0
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
@@ -264,7 +262,7 @@ class NIOTSConnectionChannelTests: XCTestCase {
             XCTAssertEqual(option.high, 64 * 1024)
             XCTAssertEqual(option.low, 32 * 1024)
 
-            return connection.setOption(ChannelOptions.writeBufferWaterMark, value: WriteBufferWaterMark(low: 1, high: 101))
+            return connection.setOption(ChannelOptions.writeBufferWaterMark, value: ChannelOptions.Types.WriteBufferWaterMark(low: 1, high: 101))
         }.flatMap {
             connection.getOption(ChannelOptions.writeBufferWaterMark)
         }.map {
@@ -291,7 +289,7 @@ class NIOTSConnectionChannelTests: XCTestCase {
             .wait()
 
         // We're going to set some helpful watermarks, and allocate a big buffer.
-        XCTAssertNoThrow(try connection.setOption(ChannelOptions.writeBufferWaterMark, value: WriteBufferWaterMark(low: 2, high: 2048)).wait())
+        XCTAssertNoThrow(try connection.setOption(ChannelOptions.writeBufferWaterMark, value: ChannelOptions.Types.WriteBufferWaterMark(low: 2, high: 2048)).wait())
         var buffer = connection.allocator.buffer(capacity: 2048)
         buffer.writeBytes(repeatElement(UInt8(4), count: 2048))
 
@@ -426,36 +424,36 @@ class NIOTSConnectionChannelTests: XCTestCase {
             XCTAssertTrue(connection.isWritable)
         }.wait()
 
-        try connection.setOption(ChannelOptions.writeBufferWaterMark, value: WriteBufferWaterMark(low: 128, high: 256)).flatMap {
+        try connection.setOption(ChannelOptions.writeBufferWaterMark, value: ChannelOptions.Types.WriteBufferWaterMark(low: 128, high: 256)).flatMap {
             // High to 256, low to 128. No writability change.
             XCTAssertEqual(writabilities, [])
             XCTAssertTrue(connection.isWritable)
 
-            return connection.setOption(ChannelOptions.writeBufferWaterMark, value: WriteBufferWaterMark(low: 128, high: 255))
+            return connection.setOption(ChannelOptions.writeBufferWaterMark, value: ChannelOptions.Types.WriteBufferWaterMark(low: 128, high: 255))
         }.flatMap {
             // High to 255, low to 127. Channel becomes not writable.
             XCTAssertEqual(writabilities, [false])
             XCTAssertFalse(connection.isWritable)
 
-            return connection.setOption(ChannelOptions.writeBufferWaterMark, value: WriteBufferWaterMark(low: 128, high: 256))
+            return connection.setOption(ChannelOptions.writeBufferWaterMark, value: ChannelOptions.Types.WriteBufferWaterMark(low: 128, high: 256))
         }.flatMap {
             // High back to 256, low to 128. No writability change.
             XCTAssertEqual(writabilities, [false])
             XCTAssertFalse(connection.isWritable)
 
-            return connection.setOption(ChannelOptions.writeBufferWaterMark, value: WriteBufferWaterMark(low: 256, high: 1024))
+            return connection.setOption(ChannelOptions.writeBufferWaterMark, value: ChannelOptions.Types.WriteBufferWaterMark(low: 256, high: 1024))
         }.flatMap {
             // High to 1024, low to 128. No writability change.
             XCTAssertEqual(writabilities, [false])
             XCTAssertFalse(connection.isWritable)
 
-            return connection.setOption(ChannelOptions.writeBufferWaterMark, value: WriteBufferWaterMark(low: 257, high: 1024))
+            return connection.setOption(ChannelOptions.writeBufferWaterMark, value: ChannelOptions.Types.WriteBufferWaterMark(low: 257, high: 1024))
         }.flatMap {
             // Low to 257, channel becomes writable again.
             XCTAssertEqual(writabilities, [false, true])
             XCTAssertTrue(connection.isWritable)
 
-            return connection.setOption(ChannelOptions.writeBufferWaterMark, value: WriteBufferWaterMark(low: 256, high: 1024))
+            return connection.setOption(ChannelOptions.writeBufferWaterMark, value: ChannelOptions.Types.WriteBufferWaterMark(low: 256, high: 1024))
         }.map {
             // Low back to 256, no writability change.
             XCTAssertEqual(writabilities, [false, true])
@@ -709,8 +707,32 @@ class NIOTSConnectionChannelTests: XCTestCase {
         XCTAssertNoThrow(try connection.eventLoop.submit {
             XCTAssertEqual(testHandler.readCount, 2)
         }.wait())
+    }
 
-        
+    func testLoadingAddressesInMultipleQueues() throws {
+        let listener = try NIOTSListenerBootstrap(group: self.group)
+            .bind(host: "localhost", port: 0).wait()
+        defer {
+            XCTAssertNoThrow(try listener.close().wait())
+        }
+
+        let ourSyncQueue = DispatchQueue(label: "ourSyncQueue")
+
+        let workFuture = NIOTSConnectionBootstrap(group: self.group).connect(to: listener.localAddress!).map { channel -> Channel in
+            XCTAssertTrue(channel.eventLoop.inEventLoop)
+
+            ourSyncQueue.sync {
+                XCTAssertFalse(channel.eventLoop.inEventLoop)
+
+                // These will crash before we apply our fix.
+                XCTAssertNotNil(channel.localAddress)
+                XCTAssertNotNil(channel.remoteAddress)
+            }
+
+            return channel
+        }.flatMap { $0.close() }
+
+        XCTAssertNoThrow(try workFuture.wait())
     }
 }
 #endif

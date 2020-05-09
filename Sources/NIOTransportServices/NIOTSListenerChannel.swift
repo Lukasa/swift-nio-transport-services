@@ -7,9 +7,7 @@
 //
 // See LICENSE.txt for license information
 // See CONTRIBUTORS.txt for the list of SwiftNIO project authors
-// swift-tools-version:4.0
 //
-// swift-tools-version:4.0
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
@@ -65,7 +63,7 @@ internal final class NIOTSListenerChannel {
     internal let supportedActivationType: ActivationType = .bind
 
     /// The active state, used for safely reporting the channel state across threads.
-    internal var isActive0: Atomic<Bool> = Atomic(value: false)
+    internal var isActive0: NIOAtomic<Bool> = .makeAtomic(value: false)
 
     /// Whether a call to NWListener.receive has been made, but the completion
     /// handler has not yet been invoked.
@@ -94,6 +92,12 @@ internal final class NIOTSListenerChannel {
 
     /// The TLS options to use for child channels.
     private let childTLSOptions: NWProtocolTLS.Options?
+
+    /// The cache of the local and remote socket addresses. Must be accessed using _addressCacheLock.
+    private var _addressCache = AddressCache(local: nil, remote: nil)
+
+    /// A lock that guards the _addressCache.
+    private let _addressCacheLock = Lock()
 
 
     /// Create a `NIOTSListenerChannel` on a given `NIOTSEventLoop`.
@@ -133,19 +137,15 @@ extension NIOTSListenerChannel: Channel {
 
     /// The local address for this channel.
     public var localAddress: SocketAddress? {
-        if self.eventLoop.inEventLoop {
-            return try? self.localAddress0()
-        } else {
-            return self.connectionQueue.sync { try? self.localAddress0() }
+        return self._addressCacheLock.withLock {
+            return self._addressCache.local
         }
     }
 
     /// The remote address for this channel.
     public var remoteAddress: SocketAddress? {
-        if self.eventLoop.inEventLoop {
-            return try? self.remoteAddress0()
-        } else {
-            return self.connectionQueue.sync { try? self.remoteAddress0() }
+        return self._addressCacheLock.withLock {
+            return self._addressCache.remote
         }
     }
 
@@ -178,12 +178,12 @@ extension NIOTSListenerChannel: Channel {
 
         // TODO: Many more channel options, both from NIO and Network.framework.
         switch option {
-        case is AutoReadOption:
+        case is ChannelOptions.Types.AutoReadOption:
             // AutoRead is currently mandatory for TS listeners.
-            if value as! AutoReadOption.Value == false {
+            if value as! ChannelOptions.Types.AutoReadOption.Value == false {
                 throw ChannelError.operationUnsupported
             }
-        case let optionValue as SocketOption:
+        case let optionValue as ChannelOptions.Types.SocketOption:
             // SO_REUSEADDR and SO_REUSEPORT are handled here.
             switch (optionValue.level, optionValue.name) {
             case (SOL_SOCKET, SO_REUSEADDR):
@@ -193,8 +193,8 @@ extension NIOTSListenerChannel: Channel {
             default:
                 try self.tcpOptions.applyChannelOption(option: optionValue, value: value as! SocketOptionValue)
             }
-        case is NIOTSEnablePeerToPeerOption:
-            self.enablePeerToPeer = value as! NIOTSEnablePeerToPeerOption.Value
+        case is NIOTSChannelOptions.Types.NIOTSEnablePeerToPeerOption:
+            self.enablePeerToPeer = value as! NIOTSChannelOptions.Types.NIOTSEnablePeerToPeerOption.Value
         default:
             fatalError("option \(option) not supported")
         }
@@ -218,9 +218,9 @@ extension NIOTSListenerChannel: Channel {
         }
 
         switch option {
-        case is AutoReadOption:
+        case is ChannelOptions.Types.AutoReadOption:
             return autoRead as! Option.Value
-        case let optionValue as SocketOption:
+        case let optionValue as ChannelOptions.Types.SocketOption:
             // SO_REUSEADDR and SO_REUSEPORT are handled here.
             switch (optionValue.level, optionValue.name) {
             case (SOL_SOCKET, SO_REUSEADDR):
@@ -230,7 +230,7 @@ extension NIOTSListenerChannel: Channel {
             default:
                 return try self.tcpOptions.valueFor(socketOption: optionValue) as! Option.Value
             }
-        case is NIOTSEnablePeerToPeerOption:
+        case is NIOTSChannelOptions.Types.NIOTSEnablePeerToPeerOption:
             return self.enablePeerToPeer as! Option.Value
         default:
             fatalError("option \(option) not supported")
@@ -456,6 +456,14 @@ extension NIOTSListenerChannel {
     private func bindComplete0() {
         let promise = self.bindPromise
         self.bindPromise = nil
+
+        // Before becoming active, update the cached addresses. Remote is always nil.
+        let localAddress = try? self.localAddress0()
+
+        self._addressCacheLock.withLock {
+            self._addressCache = AddressCache(local: localAddress, remote: nil)
+        }
+
         self.becomeActive0(promise: promise)
     }
 }

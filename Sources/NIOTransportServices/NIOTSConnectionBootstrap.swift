@@ -2,14 +2,12 @@
 //
 // This source file is part of the SwiftNIO open source project
 //
-// Copyright (c) 2017-2018 Apple Inc. and the SwiftNIO project authors
+// Copyright (c) 2017-2020 Apple Inc. and the SwiftNIO project authors
 // Licensed under Apache License v2.0
 //
 // See LICENSE.txt for license information
 // See CONTRIBUTORS.txt for the list of SwiftNIO project authors
-// swift-tools-version:4.0
 //
-// swift-tools-version:4.0
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
@@ -19,32 +17,54 @@ import NIO
 import Dispatch
 import Network
 
+/// A `NIOTSConnectionBootstrap` is an easy way to bootstrap a `NIOTSConnectionChannel` when creating network clients.
+///
+/// Usually you re-use a `NIOTSConnectionBootstrap` once you set it up and called `connect` multiple times on it.
+/// This way you ensure that the same `EventLoop`s will be shared across all your connections.
+///
+/// Example:
+///
+/// ```swift
+///     let group = NIOTSEventLoopGroup()
+///     defer {
+///         try! group.syncShutdownGracefully()
+///     }
+///     let bootstrap = NIOTSConnectionBootstrap(group: group)
+///         .channelInitializer { channel in
+///             channel.pipeline.addHandler(MyChannelHandler())
+///         }
+///     try! bootstrap.connect(host: "example.org", port: 12345).wait()
+///     /* the Channel is now connected */
+/// ```
+///
+/// The connected `NIOTSConnectionChannel` will operate on `ByteBuffer` as inbound and on `IOData` as outbound messages.
 @available(OSX 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *)
 public final class NIOTSConnectionBootstrap {
     private let group: EventLoopGroup
     private var channelInitializer: ((Channel) -> EventLoopFuture<Void>)?
     private var connectTimeout: TimeAmount = TimeAmount.seconds(10)
-    private var channelOptions = ChannelOptionsStorage()
+    private var channelOptions = ChannelOptions.Storage()
     private var qos: DispatchQoS?
     private var tcpOptions: NWProtocolTCP.Options = .init()
     private var tlsOptions: NWProtocolTLS.Options?
+    private var protocolHandlers: Optional<() -> [ChannelHandler]> = nil
 
     /// Create a `NIOTSConnectionBootstrap` on the `EventLoopGroup` `group`.
     ///
-    /// This initializer only exists to be more in-line with the NIO core bootstraps, in that they
-    /// may be constructed with an `EventLoopGroup` and by extenstion an `EventLoop`. As such an
-    /// existing `NIOTSEventLoop` may be used to initialize this bootstrap. Where possible the
-    /// initializers accepting `NIOTSEventLoopGroup` should be used instead to avoid the wrong
-    /// type being used.
-    ///
-    /// Note that the "real" solution is described in https://github.com/apple/swift-nio/issues/674.
+    /// The `EventLoopGroup` `group` must be compatible, otherwise the program will crash. `NIOTSConnectionBootstrap` is
+    /// compatible only with `NIOTSEventLoopGroup` as well as the `EventLoop`s returned by
+    /// `NIOTSEventLoopGroup.next`. See `init(validatingGroup:)` for a fallible initializer for
+    /// situations where it's impossible to tell ahead of time if the `EventLoopGroup` is compatible or not.
     ///
     /// - parameters:
     ///     - group: The `EventLoopGroup` to use.
-    public init(group: EventLoopGroup) {
-        self.group = group
+    public convenience init(group: EventLoopGroup) {
+        guard NIOTSBootstraps.isCompatible(group: group) else {
+            preconditionFailure("NIOTSConnectionBootstrap is only compatible with NIOTSEventLoopGroup and " +
+                                "NIOTSEventLoop. You tried constructing one with \(group) which is incompatible.")
+        }
 
-        self.channelOptions.append(key: ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
+        self.init(validatingGroup: group)!
     }
 
     /// Create a `NIOTSConnectionBootstrap` on the `NIOTSEventLoopGroup` `group`.
@@ -53,6 +73,20 @@ public final class NIOTSConnectionBootstrap {
     ///     - group: The `NIOTSEventLoopGroup` to use.
     public convenience init(group: NIOTSEventLoopGroup) {
       self.init(group: group as EventLoopGroup)
+    }
+
+    /// Create a `NIOTSConnectionBootstrap` on the `NIOTSEventLoopGroup` `group`, validating
+    /// that the `EventLoopGroup` is compatible with `NIOTSConnectionBootstrap`.
+    ///
+    /// - parameters:
+    ///     - group: The `EventLoopGroup` to use.
+    public init?(validatingGroup group: EventLoopGroup) {
+        guard NIOTSBootstraps.isCompatible(group: group) else {
+            return nil
+        }
+
+        self.group = group
+        self.channelOptions.append(key: ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
     }
 
     /// Initialize the connected `NIOTSConnectionChannel` with `initializer`. The most common task in initializer is to add
@@ -169,7 +203,7 @@ public final class NIOTSConnectionBootstrap {
         let initializer = self.channelInitializer ?? { _ in conn.eventLoop.makeSucceededFuture(()) }
         let channelOptions = self.channelOptions
 
-        return conn.eventLoop.submit {
+        return conn.eventLoop.flatSubmit {
             return channelOptions.applyAllChannelOptions(to: conn).flatMap {
                 initializer(conn)
             }.flatMap {
@@ -191,68 +225,22 @@ public final class NIOTSConnectionBootstrap {
                 conn.close(promise: nil)
                 throw $0
             }
-        }.flatMap { $0 }
+        }
+    }
+
+    /// Sets the protocol handlers that will be added to the front of the `ChannelPipeline` right after the
+    /// `channelInitializer` has been called.
+    ///
+    /// Per bootstrap, you can only set the `protocolHandlers` once. Typically, `protocolHandlers` are used for the TLS
+    /// implementation. Most notably, `NIOClientTCPBootstrap`, NIO's "universal bootstrap" abstraction, uses
+    /// `protocolHandlers` to add the required `ChannelHandler`s for many TLS implementations.
+    public func protocolHandlers(_ handlers: @escaping () -> [ChannelHandler]) -> Self {
+        precondition(self.protocolHandlers == nil, "protocol handlers can only be set once")
+        self.protocolHandlers = handlers
+        return self
     }
 }
 
-// This is a backport of ChannelOptions.Storage from SwiftNIO because the initializer wasn't public, so we couldn't actually build it.
-// When https://github.com/apple/swift-nio/pull/988 is in a shipped release, we can remove this and simply bump our lowest supported version of SwiftNIO.
 @available(OSX 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *)
-internal struct ChannelOptionsStorage {
-    internal var _storage: [(Any, (Any, (Channel) -> (Any, Any) -> EventLoopFuture<Void>))] = []
-
-    internal init() { }
-
-    /// Add `Options`, a `ChannelOption` to the `ChannelOptionsStorage`.
-    ///
-    /// - parameters:
-    ///    - key: the key for the option
-    ///    - value: the value for the option
-    internal mutating func append<Option: ChannelOption>(key newKey: Option, value newValue: Option.Value) {
-        func applier(_ t: Channel) -> (Any, Any) -> EventLoopFuture<Void> {
-            return { (option, value) in
-                return t.setOption(option as! Option, value: value as! Option.Value)
-            }
-        }
-        var hasSet = false
-        self._storage = self._storage.map { currentKeyAndValue in
-            let (currentKey, _) = currentKeyAndValue
-            if let currentKey = currentKey as? Option, currentKey == newKey {
-                hasSet = true
-                return (currentKey, (newValue, applier))
-            } else {
-                return currentKeyAndValue
-            }
-        }
-        if !hasSet {
-            self._storage.append((newKey, (newValue, applier)))
-        }
-    }
-
-    /// Apply all stored `ChannelOption`s to `Channel`.
-    ///
-    /// - parameters:
-    ///    - channel: The `Channel` to apply the `ChannelOption`s to
-    /// - returns:
-    ///    - An `EventLoopFuture` that is fulfilled when all `ChannelOption`s have been applied to the `Channel`.
-    public func applyAllChannelOptions(to channel: Channel) -> EventLoopFuture<Void> {
-        let applyPromise = channel.eventLoop.makePromise(of: Void.self)
-        var it = self._storage.makeIterator()
-
-        func applyNext() {
-            guard let (key, (value, applier)) = it.next() else {
-                // If we reached the end, everything is applied.
-                applyPromise.succeed(())
-                return
-            }
-
-            applier(channel)(key, value).map {
-                applyNext()
-                }.cascadeFailure(to: applyPromise)
-        }
-        applyNext()
-
-        return applyPromise.futureResult
-    }
-}
+extension NIOTSConnectionBootstrap: NIOClientTCPBootstrapProtocol {}
 #endif

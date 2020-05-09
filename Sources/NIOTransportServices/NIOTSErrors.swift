@@ -7,9 +7,7 @@
 //
 // See LICENSE.txt for license information
 // See CONTRIBUTORS.txt for the list of SwiftNIO project authors
-// swift-tools-version:4.0
 //
-// swift-tools-version:4.0
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
@@ -36,7 +34,7 @@ public enum NIOTSErrors {
     /// `UnsupportedSocketOption` is thrown when an attempt is made to configure a socket option that
     /// is not supported by Network.framework.
     public struct UnsupportedSocketOption: NIOTSError {
-        public let optionValue: SocketOption
+        public let optionValue: ChannelOptions.Types.SocketOption
 
         public static func ==(lhs: UnsupportedSocketOption, rhs: UnsupportedSocketOption) -> Bool {
             return lhs.optionValue == rhs.optionValue

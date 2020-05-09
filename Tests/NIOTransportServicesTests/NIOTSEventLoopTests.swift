@@ -7,9 +7,7 @@
 //
 // See LICENSE.txt for license information
 // See CONTRIBUTORS.txt for the list of SwiftNIO project authors
-// swift-tools-version:4.0
 //
-// swift-tools-version:4.0
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
@@ -103,7 +101,7 @@ class NIOTSEventLoopTest: XCTestCase {
             weakELG = group
             weakEL = group.next()
 
-            let counter = Atomic<Int>(value: 0)
+            let counter = NIOAtomic<Int>.makeAtomic(value: 0)
             let acceptedChan = group.next().makePromise(of: Channel.self)
             let server = try NIOTSListenerBootstrap(group: group)
                 .childChannelInitializer { channel in

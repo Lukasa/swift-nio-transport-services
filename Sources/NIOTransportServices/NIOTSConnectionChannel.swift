@@ -7,9 +7,7 @@
 //
 // See LICENSE.txt for license information
 // See CONTRIBUTORS.txt for the list of SwiftNIO project authors
-// swift-tools-version:4.0
 //
-// swift-tools-version:4.0
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
@@ -67,6 +65,18 @@ private struct ConnectionChannelOptions {
 internal typealias PendingWrite = (data: ByteBuffer, promise: EventLoopPromise<Void>?)
 
 
+internal struct AddressCache {
+    // deliberately lets because they must always be updated together (so forcing `init` is useful).
+    let local: Optional<SocketAddress>
+    let remote: Optional<SocketAddress>
+
+    init(local: SocketAddress?, remote: SocketAddress?) {
+        self.local = local
+        self.remote = remote
+    }
+}
+
+
 /// A structure that manages backpressure signaling on this channel.
 @available(OSX 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *)
 private struct BackpressureManager {
@@ -81,13 +91,13 @@ private struct BackpressureManager {
     /// because in most cases these loads/stores will be free, as the user will never actually check the
     /// channel writability from another thread, meaning this cache line is uncontended. CAS is never free:
     /// it always has some substantial runtime cost over loads/stores.
-    let writable = Atomic<Bool>(value: true)
+    let writable = NIOAtomic<Bool>.makeAtomic(value: true)
 
     /// The number of bytes outstanding on the network.
     private var outstandingBytes: Int = 0
 
     /// The watermarks currently configured by the user.
-    private(set) var waterMarks: WriteBufferWaterMark = WriteBufferWaterMark(low: 32 * 1024, high: 64 * 1024)
+    private(set) var waterMarks = ChannelOptions.Types.WriteBufferWaterMark(low: 32 * 1024, high: 64 * 1024)
 
     /// Adds `newBytes` to the queue of outstanding bytes, and returns whether this
     /// has caused a writability change.
@@ -127,7 +137,7 @@ private struct BackpressureManager {
     /// - parameters:
     ///     - waterMarks: The new waterMarks to use.
     /// - returns: Whether the state changed.
-    mutating func writabilityChanges(whenUpdatingWaterMarks waterMarks: WriteBufferWaterMark) -> Bool {
+    mutating func writabilityChanges(whenUpdatingWaterMarks waterMarks: ChannelOptions.Types.WriteBufferWaterMark) -> Bool {
         let writable = self.writable.load()
         self.waterMarks = waterMarks
 
@@ -184,7 +194,7 @@ internal final class NIOTSConnectionChannel {
     internal var state: ChannelState<ActiveSubstate> = .idle
 
     /// The active state, used for safely reporting the channel state across threads.
-    internal var isActive0: Atomic<Bool> = Atomic(value: false)
+    internal var isActive0: NIOAtomic<Bool> = .makeAtomic(value: false)
 
     /// The kinds of channel activation this channel supports
     internal let supportedActivationType: ActivationType = .connect
@@ -210,6 +220,12 @@ internal final class NIOTSConnectionChannel {
 
     /// Whether to use peer-to-peer connectivity when connecting to Bonjour services.
     private var enablePeerToPeer = false
+
+    /// The cache of the local and remote socket addresses. Must be accessed using _addressCacheLock.
+    private var _addressCache = AddressCache(local: nil, remote: nil)
+
+    /// A lock that guards the _addressCache.
+    private let _addressCacheLock = Lock()
 
     /// Create a `NIOTSConnectionChannel` on a given `NIOTSEventLoop`.
     ///
@@ -257,19 +273,15 @@ extension NIOTSConnectionChannel: Channel {
 
     /// The local address for this channel.
     public var localAddress: SocketAddress? {
-        if self.eventLoop.inEventLoop {
-            return try? self.localAddress0()
-        } else {
-            return self.connectionQueue.sync { try? self.localAddress0() }
+        return self._addressCacheLock.withLock {
+            return self._addressCache.local
         }
     }
 
     /// The remote address for this channel.
     public var remoteAddress: SocketAddress? {
-        if self.eventLoop.inEventLoop {
-            return try? self.remoteAddress0()
-        } else {
-            return self.connectionQueue.sync { try? self.remoteAddress0() }
+        return self._addressCacheLock.withLock {
+            return self._addressCache.remote
         }
     }
 
@@ -300,13 +312,13 @@ extension NIOTSConnectionChannel: Channel {
         }
 
         switch option {
-        case _ as AutoReadOption:
+        case _ as ChannelOptions.Types.AutoReadOption:
             self.options.autoRead = value as! Bool
             self.readIfNeeded0()
-        case _ as AllowRemoteHalfClosureOption:
+        case _ as ChannelOptions.Types.AllowRemoteHalfClosureOption:
             self.options.supportRemoteHalfClosure = value as! Bool
-        case _ as SocketOption:
-            let optionValue = option as! SocketOption
+        case _ as ChannelOptions.Types.SocketOption:
+            let optionValue = option as! ChannelOptions.Types.SocketOption
 
             // SO_REUSEADDR and SO_REUSEPORT are handled here.
             switch (optionValue.level, optionValue.name) {
@@ -317,11 +329,11 @@ extension NIOTSConnectionChannel: Channel {
             default:
                 try self.tcpOptions.applyChannelOption(option: optionValue, value: value as! SocketOptionValue)
             }
-        case _ as WriteBufferWaterMarkOption:
-            if self.backpressureManager.writabilityChanges(whenUpdatingWaterMarks: value as! WriteBufferWaterMark) {
+        case _ as ChannelOptions.Types.WriteBufferWaterMarkOption:
+            if self.backpressureManager.writabilityChanges(whenUpdatingWaterMarks: value as! ChannelOptions.Types.WriteBufferWaterMark) {
                 self.pipeline.fireChannelWritabilityChanged()
             }
-        case _ as NIOTSWaitForActivityOption:
+        case _ as NIOTSChannelOptions.Types.NIOTSWaitForActivityOption:
             let newValue = value as! Bool
             self.options.waitForActivity = newValue
 
@@ -329,8 +341,8 @@ extension NIOTSConnectionChannel: Channel {
                 // We're in waiting now, so we should drop the connection.
                 self.close0(error: err, mode: .all, promise: nil)
             }
-        case is NIOTSEnablePeerToPeerOption:
-            self.enablePeerToPeer = value as! NIOTSEnablePeerToPeerOption.Value
+        case is NIOTSChannelOptions.Types.NIOTSEnablePeerToPeerOption:
+            self.enablePeerToPeer = value as! NIOTSChannelOptions.Types.NIOTSEnablePeerToPeerOption.Value
         default:
             fatalError("option \(type(of: option)).\(option) not supported")
         }
@@ -354,12 +366,12 @@ extension NIOTSConnectionChannel: Channel {
         }
 
         switch option {
-        case _ as AutoReadOption:
+        case _ as ChannelOptions.Types.AutoReadOption:
             return self.options.autoRead as! Option.Value
-        case _ as AllowRemoteHalfClosureOption:
+        case _ as ChannelOptions.Types.AllowRemoteHalfClosureOption:
             return self.options.supportRemoteHalfClosure as! Option.Value
-        case _ as SocketOption:
-            let optionValue = option as! SocketOption
+        case _ as ChannelOptions.Types.SocketOption:
+            let optionValue = option as! ChannelOptions.Types.SocketOption
 
             // SO_REUSEADDR and SO_REUSEPORT are handled here.
             switch (optionValue.level, optionValue.name) {
@@ -370,11 +382,11 @@ extension NIOTSConnectionChannel: Channel {
             default:
                 return try self.tcpOptions.valueFor(socketOption: optionValue) as! Option.Value
             }
-        case _ as WriteBufferWaterMarkOption:
+        case _ as ChannelOptions.Types.WriteBufferWaterMarkOption:
             return self.backpressureManager.waterMarks as! Option.Value
-        case _ as NIOTSWaitForActivityOption:
+        case _ as NIOTSChannelOptions.Types.NIOTSWaitForActivityOption:
             return self.options.waitForActivity as! Option.Value
-        case is NIOTSEnablePeerToPeerOption:
+        case is NIOTSChannelOptions.Types.NIOTSEnablePeerToPeerOption:
             return self.enablePeerToPeer as! Option.Value
         default:
             fatalError("option \(type(of: option)).\(option) not supported")
@@ -749,6 +761,15 @@ extension NIOTSConnectionChannel {
     private func connectionComplete0() {
         let promise = self.connectPromise
         self.connectPromise = nil
+
+        // Before becoming active, update the cached addresses.
+        let localAddress = try? self.localAddress0()
+        let remoteAddress = try? self.remoteAddress0()
+
+        self._addressCacheLock.withLock {
+            self._addressCache = AddressCache(local: localAddress, remote: remoteAddress)
+        }
+
         self.becomeActive0(promise: promise)
 
         if let metadata = self.nwConnection?.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata {

@@ -7,9 +7,7 @@
 //
 // See LICENSE.txt for license information
 // See CONTRIBUTORS.txt for the list of SwiftNIO project authors
-// swift-tools-version:4.0
 //
-// swift-tools-version:4.0
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
@@ -32,7 +30,7 @@ public protocol QoSEventLoop: EventLoop {
     /// Submit a given task to be executed by the `EventLoop` at a given `qos`.
     func execute(qos: DispatchQoS, _ task: @escaping () -> Void) -> Void
 
-    /// Schedule a `task` that is executed by this `SelectableEventLoop` after the given amount of time at the
+    /// Schedule a `task` that is executed by this `NIOTSEventLoop` after the given amount of time at the
     /// given `qos`.
     func scheduleTask<T>(in time: TimeAmount, qos: DispatchQoS, _ task: @escaping () throws -> T) -> Scheduled<T>
 }
@@ -51,7 +49,6 @@ fileprivate enum LifecycleState {
     case closing
     case closed
 }
-
 
 @available(OSX 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *)
 internal class NIOTSEventLoop: QoSEventLoop {
@@ -83,6 +80,18 @@ internal class NIOTSEventLoop: QoSEventLoop {
     /// implementation *could* return `true`, but this version will be unable to prove that and will return `false`.
     /// If you need to write an assertion about being in the event loop that must be correct, use SwiftNIO 1.11 or
     /// later and call `preconditionInEventLoop` and `assertInEventLoop`.
+    ///
+    /// Further detail: The use of `DispatchQueue.sync(execute:)` to submit a block to a queue synchronously has the
+    /// effect of creating a state where the currently executing code is on two queues simultaneously - the one which
+    /// submitted the block, and the one on which the block runs. If another synchronous block is dispatched to a
+    /// third queue, that block is effectively running all three at once. Unfortunately, libdispatch maintains only
+    /// one "current" queue at a time as far as `DispatchQueue.getSpecific(key:)` is concerned, and it's always the
+    /// one actually executing code at the time. Therefore the queue belonging to the original event loop can't be
+    /// detected using its queue-specific data. No alternative API for the purpose exists (aside from assertions via
+    /// `dispatchPrecondition(condition:)`). Under these circumstances, `inEventLoop` will incorrectly be `false`,
+    /// even though the current code _is_ actually on the loop's queue. The only way to avoid this is to ensure no
+    /// callers ever use synchronous dispatch (which is impossible to enforce), or to hope that a future version of
+    /// libdispatch will provide a solution.
     public var inEventLoop: Bool {
         return DispatchQueue.getSpecific(key: self.inQueueKey) == self.loopID
     }
@@ -151,8 +160,14 @@ internal class NIOTSEventLoop: QoSEventLoop {
         }
     }
 
-    func preconditionInEventLoop(file: StaticString, line: UInt) {
+    @inlinable
+    public func preconditionInEventLoop(file: StaticString, line: UInt) {
         dispatchPrecondition(condition: .onQueue(self.loop))
+    }
+
+    @inlinable
+    public func preconditionNotInEventLoop(file: StaticString, line: UInt) {
+        dispatchPrecondition(condition: .notOnQueue(self.loop))
     }
 }
 
